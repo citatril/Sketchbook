@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Sketchbook</title>
+<style>
+:root{--bg:#d5dae1;--panel:#f3f5f7;--ink:#1d2330;--line:#c4cad3;--accent:#3d4fe0;--on-accent:#fff;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);color-scheme:light}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0f1216;--panel:#1e2229;--ink:#e6e9ee;--line:#323945;--accent:#8b97ff;--on-accent:#10131a;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#0f1216;--panel:#1e2229;--ink:#e6e9ee;--line:#323945;--accent:#8b97ff;--on-accent:#10131a;color-scheme:dark}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--ink);font:14px/1.4 "DM Sans",system-ui,-apple-system,"Segoe UI",sans-serif;overflow:hidden}
+#app{display:grid;grid-template-columns:72px 1fr 232px;height:100%}
+.side{background:var(--panel);padding:10px 8px;display:flex;flex-direction:column;gap:6px;overflow-y:auto}
+#tools{border-right:1px solid var(--line)}
+#panel{border-left:1px solid var(--line);gap:12px;padding:12px}
+button{font:inherit;color:inherit;background:transparent;border:1px solid var(--line);border-radius:8px;padding:7px 6px;cursor:pointer}
+button:hover{border-color:var(--accent)}
+button:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+button.on{background:var(--accent);color:var(--on-accent);border-color:var(--accent)}
+.gap{flex:1}
+#vp{position:relative;overflow:hidden;touch-action:none;cursor:crosshair}
+#stage{position:absolute;left:0;top:0;transform-origin:0 0;background:#fff;box-shadow:0 6px 30px rgba(0,0,0,.35)}
+#stage canvas{position:absolute;left:0;top:0;pointer-events:none}
+h2{font-size:13px;font-weight:600;margin:0 0 6px}
+label{display:flex;justify-content:space-between;font-size:12px}
+input[type=range]{width:100%;accent-color:var(--accent)}
+#color{width:100%;height:40px;padding:0;border:1px solid var(--line);border-radius:8px;background:none}
+#sw{display:grid;grid-template-columns:repeat(8,1fr);gap:4px;margin-top:6px}
+#sw button{height:22px;padding:0;border-radius:6px}
+#layers{display:flex;flex-direction:column;gap:4px}
+.ly{display:flex;align-items:center;gap:4px;border:1px solid var(--line);border-radius:8px;padding:2px}
+.ly.on{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+.ly .nm{flex:1;text-align:left;border:0}
+.ly button{border:0;padding:4px 7px}
+@media (max-width:760px){
+ #app{grid-template-columns:1fr;grid-template-rows:auto 1fr 210px}
+ #tools{flex-direction:row;border-right:0;border-bottom:1px solid var(--line);overflow-x:auto}
+ #tools button{flex:0 0 auto}.gap{display:none}
+ #panel{border-left:0;border-top:1px solid var(--line)}
+}
+</style>
+</head>
+<body>
+<div id="app">
+ <div id="tools" class="side" role="toolbar" aria-label="Tools"></div>
+ <div id="vp"><div id="stage"><canvas id="live"></canvas></div></div>
+ <div id="panel" class="side">
+  <div>
+   <h2>Color</h2>
+   <input type="color" id="color" value="#1d2330" aria-label="Brush color">
+   <div id="sw"></div>
+  </div>
+  <div>
+   <label>Size <span id="sv">12</span></label>
+   <input type="range" id="size" min="1" max="120" value="12">
+   <label>Opacity <span id="ov">100</span></label>
+   <input type="range" id="opac" min="5" max="100" value="100">
+  </div>
+  <div>
+   <h2>Layers</h2>
+   <div id="layers"></div>
+   <button id="addL" style="width:100%;margin-top:6px">Add layer</button>
+  </div>
+ </div>
+</div>
+<script>
+const $=s=>document.querySelector(s);
+const W=1400,H=900;
+const stage=$('#stage'),vp=$('#vp'),live=$('#live'),lctx=live.getContext('2d');
+stage.style.width=W+'px';stage.style.height=H+'px';
+live.width=W;live.height=H;live.style.zIndex=999;
+
+/* brushes: sp=spacing, soft=gradient edge, ps=pressure→size, pa=pressure→alpha, sc=scatter, a=stamp alpha */
+const BR={
+ Pencil:{sp:.12,soft:0,ps:.3,pa:.8,sc:.35,a:.55},
+ Ink:{sp:.07,soft:0,ps:1,pa:0,sc:0,a:1},
+ Marker:{sp:.1,soft:0,ps:.15,pa:0,sc:0,a:1},
+ Airbrush:{sp:.14,soft:1,ps:.3,pa:.6,sc:0,a:.28},
+ Eraser:{sp:.08,soft:0,ps:.5,pa:0,sc:0,a:1,erase:1}
+};
+let brush='Pencil',color='#1d2330',size=12,opacity=1;
+
+/* tools */
+const tools=$('#tools');
+Object.keys(BR).forEach(n=>{const b=document.createElement('button');b.textContent=n;b.onclick=()=>{brush=n;mark()};b.dataset.n=n;tools.append(b)});
+tools.insertAdjacentHTML('beforeend','<div class="gap"></div>');
+[['Undo',()=>undo()],['Redo',()=>redo()],['Fit',()=>fit()],['Clear',()=>{const l=layers[active];if(l){push(l);l.ctx.clearRect(0,0,W,H)}}],['Save',()=>save()]].forEach(([t,f])=>{const b=document.createElement('button');b.textContent=t;b.onclick=f;tools.append(b)});
+function mark(){tools.querySelectorAll('[data-n]').forEach(b=>b.classList.toggle('on',b.dataset.n===brush))}mark();
+
+/* color + sliders */
+$('#color').oninput=e=>color=e.target.value;
+['#1d2330','#e5484d','#f5a524','#f2d933','#3fb950','#2f80ed','#8957e5','#ffffff'].forEach(c=>{const b=document.createElement('button');b.style.background=c;b.setAttribute('aria-label',c);b.onclick=()=>{color=c;$('#color').value=c};$('#sw').append(b)});
+$('#size').oninput=e=>{size=+e.target.value;$('#sv').textContent=size};
+$('#opac').oninput=e=>{opacity=e.target.value/100;$('#ov').textContent=e.target.value};
+
+/* layers */
+let layers=[],active=-1,nid=1;
+function addLayer(){
+ const c=document.createElement('canvas');c.width=W;c.height=H;stage.insertBefore(c,live);
+ layers.splice(active+1,0,{id:nid,name:'Layer '+nid,c,ctx:c.getContext('2d'),vis:true});nid++;active=active+1;sync();
+}
+function sync(){
+ layers.forEach((l,i)=>{l.c.style.zIndex=i+1;l.c.style.display=l.vis?'block':'none'});
+ const box=$('#layers');box.innerHTML='';
+ for(let i=layers.length-1;i>=0;i--){
+  const l=layers[i],d=document.createElement('div');d.className='ly'+(i===active?' on':'');
+  const nm=document.createElement('button');nm.className='nm';nm.textContent=l.name;nm.onclick=()=>{active=i;sync()};
+  const eye=document.createElement('button');eye.textContent=l.vis?'Hide':'Show';eye.onclick=()=>{l.vis=!l.vis;sync()};
+  const del=document.createElement('button');del.textContent='Delete';del.onclick=()=>{if(layers.length<2)return;l.c.remove();layers.splice(i,1);active=Math.min(active,layers.length-1);sync()};
+  d.append(nm,eye,del);box.append(d);
+ }
+}
+$('#addL').onclick=addLayer;
+
+/* undo / redo (pixel snapshots per stroke) */
+let hist=[],redoS=[];
+const snap=l=>({l,d:l.ctx.getImageData(0,0,W,H)});
+function push(l){hist.push(snap(l));if(hist.length>15)hist.shift();redoS=[]}
+function swap(from,to){
+ while(from.length){const e=from.pop();if(!layers.includes(e.l))continue;
+  to.push(snap(e.l));e.l.ctx.putImageData(e.d,0,0);return}
+}
+const undo=()=>swap(hist,redoS),redo=()=>swap(redoS,hist);
+
+/* drawing */
+function stamp(ctx,x,y,r,a,erase){
+ ctx.globalAlpha=a;
+ const col=erase?'#000':color;
+ if(BR[brush].soft){const g=ctx.createRadialGradient(x,y,0,x,y,r);g.addColorStop(0,col);g.addColorStop(1,col+'00');ctx.fillStyle=g}
+ else ctx.fillStyle=col;
+ ctx.beginPath();ctx.arc(x,y,Math.max(.5,r),0,7);ctx.fill();
+}
+let drawing=false,pan=null,last=null,space=false,layer=null;
+function pt(e){const r=stage.getBoundingClientRect();return{x:(e.clientX-r.left)/view.s,y:(e.clientY-r.top)/view.s,p:e.pointerType==='pen'?(e.pressure||.5):.6}}
+function seg(a,b){
+ const B=BR[brush],erase=!!B.erase,ctx=erase?layer.ctx:lctx;
+ if(erase)ctx.globalCompositeOperation='destination-out';
+ const dist=Math.hypot(b.x-a.x,b.y-a.y),step=Math.max(1,size*B.sp),n=Math.max(1,Math.ceil(dist/step));
+ for(let i=1;i<=n;i++){
+  const t=i/n,p=a.p+(b.p-a.p)*t,x=a.x+(b.x-a.x)*t,y=a.y+(b.y-a.y)*t;
+  const r=size/2*(1-B.ps+B.ps*p*1.6);
+  const al=B.a*(1-B.pa+B.pa*p)*(erase?opacity:1);
+  const j=B.sc*r;
+  stamp(ctx,x+(Math.random()-.5)*j,y+(Math.random()-.5)*j,r,Math.min(1,al),erase);
+ }
+ ctx.globalCompositeOperation='source-over';ctx.globalAlpha=1;
+}
+vp.addEventListener('pointerdown',e=>{
+ vp.setPointerCapture(e.pointerId);
+ if(space||e.button===1){pan={x:e.clientX-view.x,y:e.clientY-view.y};return}
+ if(e.button!==0||active<0||!layers[active].vis)return;
+ layer=layers[active];push(layer);drawing=true;
+ live.style.opacity=BR[brush].erase?1:opacity;
+ last=pt(e);seg(last,last);
+});
+vp.addEventListener('pointermove',e=>{
+ if(pan){view.x=e.clientX-pan.x;view.y=e.clientY-pan.y;apply();return}
+ if(!drawing)return;
+ for(const ev of (e.getCoalescedEvents?e.getCoalescedEvents():[e])){
+  const raw=pt(ev),n={x:last.x+(raw.x-last.x)*.6,y:last.y+(raw.y-last.y)*.6,p:last.p+(raw.p-last.p)*.5};
+  seg(last,n);last=n;
+ }
+});
+function end(){
+ pan=null;if(!drawing)return;drawing=false;
+ if(!BR[brush].erase){layer.ctx.globalAlpha=opacity;layer.ctx.drawImage(live,0,0);layer.ctx.globalAlpha=1}
+ lctx.clearRect(0,0,W,H);
+}
+vp.addEventListener('pointerup',end);vp.addEventListener('pointercancel',end);
+
+/* view: wheel zoom, space-drag pan */
+const view={x:0,y:0,s:1};
+function apply(){stage.style.transform=`translate(${view.x}px,${view.y}px) scale(${view.s})`}
+function fit(){const r=vp.getBoundingClientRect();view.s=Math.min((r.width-40)/W,(r.height-40)/H);view.x=(r.width-W*view.s)/2;view.y=(r.height-H*view.s)/2;apply()}
+vp.addEventListener('wheel',e=>{
+ e.preventDefault();const r=vp.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top;
+ const k=Math.exp(-e.deltaY*.0015),ns=Math.min(8,Math.max(.1,view.s*k)),f=ns/view.s;
+ view.x=mx-(mx-view.x)*f;view.y=my-(my-view.y)*f;view.s=ns;apply();
+},{passive:false});
+addEventListener('keydown',e=>{
+ if(e.code==='Space'){space=true;vp.style.cursor='grab';if(e.target===document.body)e.preventDefault()}
+ if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'){e.preventDefault();e.shiftKey?redo():undo()}
+});
+addEventListener('keyup',e=>{if(e.code==='Space'){space=false;vp.style.cursor='crosshair'}});
+addEventListener('resize',fit);
+
+/* save */
+function save(){
+ const o=document.createElement('canvas');o.width=W;o.height=H;const c=o.getContext('2d');
+ c.fillStyle='#fff';c.fillRect(0,0,W,H);layers.forEach(l=>l.vis&&c.drawImage(l.c,0,0));
+ const a=document.createElement('a');a.download='sketch.png';a.href=o.toDataURL('image/png');a.click();
+}
+
+addLayer();fit();
+</script>
+</body>
+</html>
